@@ -448,3 +448,25 @@ class NativeResponse(BaseResponse):
             return self._length
 
         return super().length
+
+
+class HTTP09Response(BaseResponse):
+    """Response parsed from a versionless HTTP/0.9 socket exchange.
+
+    HTTP/0.9 responses carry no status line or headers: the body runs until
+    the server closes the connection. Servers that answer with a modern
+    ``HTTP/x.y`` response are parsed leniently by the requester instead.
+    """
+
+    def __init__(
+        self,
+        url: str,
+        status: int,
+        headers: list[tuple[str, str]],
+        body: bytes,
+        elapsed: float = 0.0,
+    ) -> None:
+        super().__init__(url, status, headers, elapsed)
+        self.body = body
+        self._body_complete = True
+        self.content = _decode_response_body(self.body, None, False)

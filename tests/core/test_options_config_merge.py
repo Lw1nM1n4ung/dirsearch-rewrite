@@ -18,6 +18,9 @@ max-recursion-depth = 4
 max-time = 60
 target-max-time = 30
 
+[request]
+http-version = 0.9
+
 [connection]
 delay = 0.5
 max-retries = 3
@@ -50,6 +53,8 @@ class TestOptionsConfigMerge(TestCase):
             "0",
             "--max-rate",
             "0",
+            "--http-version",
+            "1.1",
         )
 
         self.assertEqual(options.filter_threshold, 0)
@@ -59,6 +64,7 @@ class TestOptionsConfigMerge(TestCase):
         self.assertEqual(options.delay, 0.0)
         self.assertEqual(options.max_retries, 0)
         self.assertEqual(options.max_rate, 0)
+        self.assertEqual(options.http_version, "1.1")
 
     def test_unset_values_still_use_config_values(self):
         options = self.merge()
@@ -70,3 +76,14 @@ class TestOptionsConfigMerge(TestCase):
         self.assertEqual(options.delay, 0.5)
         self.assertEqual(options.max_retries, 3)
         self.assertEqual(options.max_rate, 9)
+        self.assertEqual(options.http_version, "0.9")
+
+    def test_http_version_falls_back_to_http11_without_config(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.ini"
+            config_path.write_text("[general]\n", encoding="utf-8")
+            argv = ["dirsearch.py", "--config", str(config_path)]
+            with patch.object(sys, "argv", argv):
+                options = merge_config(parse_arguments())
+
+        self.assertEqual(options.http_version, "1.1")

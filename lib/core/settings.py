@@ -127,6 +127,8 @@ CRAWL_TAGS = ("a", "area", "base", "blockquote", "button", "embed", "form", "fra
 
 AUTHENTICATION_TYPES = ("basic", "digest", "bearer", "ntlm", "jwt")
 
+HTTP_VERSIONS = ("0.9", "1.0", "1.1")
+
 PROXY_SCHEMES = ("http://", "https://", "socks5://", "socks5h://", "socks4://", "socks4a://")
 
 STANDARD_PORTS = {"http": 80, "https": 443}

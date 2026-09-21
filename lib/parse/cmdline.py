@@ -23,6 +23,7 @@ from optparse import OptionParser, OptionGroup, Values
 from lib.core.settings import (
     AUTHENTICATION_TYPES,
     FILE_BASED_OUTPUT_FORMATS,
+    HTTP_VERSIONS,
     VERSION,
 )
 from lib.utils.common import get_config_file
@@ -695,6 +696,16 @@ def parse_arguments(arguments: list[str] | None = None) -> Values:
         dest="http_method",
         metavar="METHOD",
         help="HTTP method (default: GET)",
+    )
+    request.add_option(
+        "--http-version",
+        action="store",
+        dest="http_version",
+        metavar="VERSION",
+        help=(
+            "HTTP protocol version "
+            f"({', '.join(HTTP_VERSIONS)}) (default: 1.1)"
+        ),
     )
     request.add_option(
         "--request-backend",

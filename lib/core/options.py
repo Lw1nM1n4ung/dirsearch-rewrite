@@ -30,6 +30,7 @@ from lib.core.settings import (
     DEFAULT_SESSION_DIR,
     DEFAULT_TOR_PROXIES,
     FILE_BASED_OUTPUT_FORMATS,
+    HTTP_VERSIONS,
     SCRIPT_PATH,
     WORDLIST_CATEGORIES,
     WORDLIST_CATEGORY_DIR,
@@ -207,6 +208,32 @@ def parse_options() -> dict[str, Any]:
     elif opt.proxies_file:
         fd = _access_file(opt.proxies_file)
         opt.proxies = fd.get_lines()
+
+    if opt.http_version not in HTTP_VERSIONS:
+        print(
+            "--http-version must be one of: " + ", ".join(HTTP_VERSIONS)
+        )
+        sys.exit(1)
+
+    if opt.http_version in ("0.9", "1.0"):
+        if _is_cli_flag_present("-a", "--async"):
+            print(
+                f"--http-version {opt.http_version} requires the sync engine; "
+                "remove -a/--async"
+            )
+            sys.exit(1)
+        opt.async_mode = False
+
+    if opt.http_version == "0.9":
+        if opt.http_method != "GET":
+            print("--http-version 0.9 supports GET requests only")
+            sys.exit(1)
+        if opt.data or opt.data_file:
+            print("--http-version 0.9 does not support request bodies")
+            sys.exit(1)
+        if opt.proxies or opt.tor or opt.replay_proxy:
+            print("--http-version 0.9 does not support proxies")
+            sys.exit(1)
 
     if opt.data_file:
         fd = _access_file(opt.data_file)
@@ -760,6 +787,9 @@ def merge_config(opt: Values) -> Values:
     )
     opt.request_backend = opt.request_backend or config.safe_get(
         "request", "request-backend", "python"
+    )
+    opt.http_version = opt.http_version or config.safe_get(
+        "request", "http-version", "1.1"
     )
     opt.headers = opt.headers or config.safe_getlist("request", "headers")
     opt.headers_file = opt.headers_file or config.safe_get("request", "headers-file")

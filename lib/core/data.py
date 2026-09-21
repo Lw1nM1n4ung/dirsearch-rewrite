@@ -88,6 +88,7 @@ options: dict[str, Any] = {
     "target_max_time": 0,
     "http_method": "GET",
     "request_backend": "python",
+    "http_version": "1.1",
     "data": None,
     "data_file": None,
     "nmap_report": None,

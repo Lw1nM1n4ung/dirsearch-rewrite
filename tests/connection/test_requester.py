@@ -132,6 +132,9 @@ class RequestTargetHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         target = self.raw_requestline.split(b" ")[1]
         self.server.targets.append(target)
+        self.server.request_versions.append(
+            self.raw_requestline.split(b" ")[2].rstrip(b"\r\n")
+        )
         self.server.authorizations.append(self.headers.get("Authorization"))
         self.server.cookies.append(self.headers.get("Cookie"))
         self.server.proxy_authorizations.append(
@@ -184,6 +187,7 @@ class RequestTargetServer:
     def __enter__(self):
         self.server = RequestTargetTCPServer(("127.0.0.1", 0), RequestTargetHandler)
         self.server.targets = []
+        self.server.request_versions = []
         self.server.authorizations = []
         self.server.cookies = []
         self.server.proxy_authorizations = []
@@ -208,6 +212,10 @@ class RequestTargetServer:
     @property
     def targets(self):
         return self.server.targets
+
+    @property
+    def request_versions(self):
+        return self.server.request_versions
 
     @property
     def proxy_authorizations(self):
@@ -1554,3 +1562,173 @@ class TestResponseStoreTransportIntegration(
         self.assertIsNotNone(response)
         self.assertFalse(response.filtered)
         self.assertEqual(response.content, ARABIC_TEXT)
+
+
+class HTTP09TCPServer:
+    """Minimal server speaking raw HTTP/0.9 over one connection.
+
+    Records the versionless request line, writes a caller-configured byte
+    response, and closes the connection, which is the only body delimiter
+    HTTP/0.9 defines.
+    """
+
+    def __init__(
+        self,
+        response: bytes = b"legacy body",
+        keep_open: bool = False,
+    ):
+        self.response = response
+        self.keep_open = keep_open
+        self.requests: list[bytes] = []
+
+    def __enter__(self):
+        self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._listener.bind(("127.0.0.1", 0))
+        self._listener.listen(8)
+        self._listener.settimeout(0.2)
+        self.port = self._listener.getsockname()[1]
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+        return self
+
+    def _serve(self):
+        while not self._stop.is_set():
+            try:
+                connection, _ = self._listener.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+
+            with connection:
+                connection.settimeout(2)
+                try:
+                    request_line = connection.makefile("rb").readline()
+                    self.requests.append(request_line)
+                    connection.sendall(self.response)
+                    if self.keep_open:
+                        connection.settimeout(1)
+                        try:
+                            connection.recv(1024)
+                        except (socket.timeout, OSError):
+                            pass
+                except (socket.timeout, OSError):
+                    pass
+
+    def __exit__(self, *_exc_info):
+        self._stop.set()
+        self._listener.close()
+        self._thread.join(timeout=2)
+
+    @property
+    def url(self):
+        return f"http://127.0.0.1:{self.port}/"
+
+
+class TestRequesterHTTP09(BaseRequesterTestCase):
+    def test_http09_sends_versionless_request_line(self):
+        options["http_version"] = "0.9"
+        with HTTP09TCPServer(b"hello world") as server:
+            requester = Requester()
+            requester.set_url(server.url)
+            try:
+                response = requester.request("admin")
+            finally:
+                requester.close()
+
+        self.assertEqual(server.requests, [b"GET /admin\r\n"])
+        self.assertEqual(response.status, 200)
+        self.assertEqual(len(response.headers), 0)
+        self.assertEqual(response.body, b"hello world")
+        self.assertEqual(response.content, "hello world")
+
+    def test_http09_parses_modern_status_line_response(self):
+        options["http_version"] = "0.9"
+        wire = b"HTTP/1.0 404 Not Found\r\ncontent-length: 9\r\n\r\nnot found"
+        with HTTP09TCPServer(wire) as server:
+            requester = Requester()
+            requester.set_url(server.url)
+            try:
+                response = requester.request("missing")
+            finally:
+                requester.close()
+
+        self.assertEqual(response.status, 404)
+        self.assertEqual(response.headers.get("content-length"), "9")
+        self.assertEqual(response.body, b"not found")
+
+    def test_http09_stops_reading_framed_content_length_response(self):
+        options["http_version"] = "0.9"
+        options["timeout"] = 3
+        wire = b"HTTP/1.0 200 OK\r\ncontent-length: 5\r\n\r\nhello"
+        with HTTP09TCPServer(wire, keep_open=True) as server:
+            requester = Requester()
+            requester.set_url(server.url)
+            try:
+                response = requester.request("admin")
+            finally:
+                requester.close()
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.body, b"hello")
+
+    def test_http09_appends_base_query(self):
+        options["http_version"] = "0.9"
+        with HTTP09TCPServer() as server:
+            requester = Requester()
+            requester.set_url(server.url)
+            requester.set_query("debug=true")
+            try:
+                requester.request("admin")
+            finally:
+                requester.close()
+
+        self.assertEqual(server.requests, [b"GET /admin?debug=true\r\n"])
+
+    def test_http09_rejects_https_targets(self):
+        options["http_version"] = "0.9"
+        requester = Requester()
+        requester.set_url("https://example.com/")
+        try:
+            with self.assertRaises(RequestException) as ctx:
+                requester.request("admin")
+        finally:
+            requester.close()
+
+        self.assertEqual(
+            str(ctx.exception),
+            "--http-version 0.9 requires an http:// target URL",
+        )
+
+
+class TestRequesterHTTP10(BaseRequesterTestCase):
+    def test_sync_requester_sends_http10_request_line(self):
+        options["http_version"] = "1.0"
+        with RequestTargetServer() as server:
+            requester = Requester()
+            requester.set_url(server.url)
+            try:
+                response = requester.request("admin")
+            finally:
+                requester.close()
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(server.request_versions, [b"HTTP/1.0"])
+
+    def test_http10_does_not_leak_into_default_requester(self):
+        options["http_version"] = "1.0"
+        requester = Requester()
+        requester.close()
+
+        options["http_version"] = "1.1"
+        with RequestTargetServer() as server:
+            default_requester = Requester()
+            default_requester.set_url(server.url)
+            try:
+                default_requester.request("admin")
+            finally:
+                default_requester.close()
+
+        self.assertEqual(server.request_versions, [b"HTTP/1.1"])

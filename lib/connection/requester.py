@@ -54,12 +54,19 @@ from lib.connection.proxy import (
     proxy_error_status,
 )
 from lib.connection.rate_limiter import RequestRateLimiter
-from lib.connection.response import AsyncResponse, Response
+from lib.connection.response import (
+    AsyncResponse,
+    BaseResponse,
+    HTTP09Response,
+    Response,
+)
 from lib.core.data import options
 from lib.core.decorators import cached
 from lib.core.exceptions import RequestException
 from lib.core.logger import logger
 from lib.core.settings import (
+    ITER_CHUNK_SIZE,
+    MAX_RESPONSE_SIZE,
     PROXY_SCHEMES,
     RATE_UPDATE_DELAY,
     READ_RESPONSE_ERROR_REGEX,
@@ -80,6 +87,72 @@ def _join_request_target(base_url: str, quoted_path: str) -> str:
     base_path = urlparse(base_url).path or "/"
     target = "/" if base_path == "/" else f"{base_path.rstrip('/')}/"
     return target + quoted_path.lstrip("/")
+
+
+def _parse_http09_response(
+    body: bytes,
+) -> tuple[int, list[tuple[str, str]], bytes]:
+    """Split a raw HTTP/0.9 reply into status, headers, and payload.
+
+    HTTP/0.9 responses are body-only. Some servers answer a versionless
+    request with a modern ``HTTP/x.y`` response; parse those leniently so
+    status codes and headers still reach filters and reports.
+    """
+    if not body.startswith(b"HTTP/"):
+        return 200, [], body
+
+    try:
+        head, separator, payload = body.partition(b"\r\n\r\n")
+        if not separator:
+            return 200, [], body
+
+        status_line, _, raw_headers = head.partition(b"\r\n")
+        try:
+            status = int(status_line.split()[1])
+        except (IndexError, ValueError):
+            return 200, [], body
+
+        headers = []
+        for line in raw_headers.split(b"\r\n"):
+            name, colon, value = line.partition(b":")
+            if not colon:
+                continue
+            headers.append(
+                (
+                    name.strip().decode("latin-1"),
+                    value.strip().decode("latin-1"),
+                )
+            )
+
+        return status, headers, payload
+    except (UnicodeError, ValueError):
+        return 200, [], body
+
+
+def _is_complete_http09_payload(data: bytes) -> bool:
+    """Whether a partially read HTTP/0.9 reply is already complete.
+
+    Versionless replies end only when the server closes the connection, but
+    a framed ``HTTP/x.y`` reply carrying a content-length is complete once
+    the declared body has arrived, even on a keep-alive connection.
+    """
+    if not data.startswith(b"HTTP/"):
+        return False
+
+    head, separator, payload = data.partition(b"\r\n\r\n")
+    if not separator:
+        return False
+
+    for line in head.split(b"\r\n")[1:]:
+        name, colon, value = line.partition(b":")
+        if not colon or name.strip().lower() != b"content-length":
+            continue
+        try:
+            return len(payload) >= int(value.strip())
+        except ValueError:
+            return False
+
+    return False
 
 
 # urllib3 encodes origin-form targets before writing them to the socket. Keep
@@ -111,7 +184,25 @@ class _PathPreservingRequestMixin:
         return super().request(method, url, body, headers, *args, **kwargs)
 
 
+class _HTTPVersionControlledRequestMixin:
+    """Send the request line version selected by --http-version.
+
+    http.client builds the request line from the ``_http_vsn`` and
+    ``_http_vsn_str`` attributes, which both urllib3 lines inherit. Set them
+    per connection so one requester's version never leaks into another.
+    """
+
+    def putrequest(self, method, url, *args, **kwargs):
+        version = options.get("http_version", "1.1")
+        if version in ("0.9", "1.0", "1.1"):
+            self._http_vsn = 10 if version == "1.0" else 11
+            self._http_vsn_str = "HTTP/" + version
+
+        return super().putrequest(method, url, *args, **kwargs)
+
+
 class PathPreservingHTTPConnection(
+    _HTTPVersionControlledRequestMixin,
     _PathPreservingRequestMixin,
     _ScopedDNSConnection,
     urllib3_connection.HTTPConnection,
@@ -120,6 +211,7 @@ class PathPreservingHTTPConnection(
 
 
 class PathPreservingHTTPSConnection(
+    _HTTPVersionControlledRequestMixin,
     _PathPreservingRequestMixin,
     _ScopedDNSConnection,
     urllib3_connection.HTTPSConnection,
@@ -128,6 +220,7 @@ class PathPreservingHTTPSConnection(
 
 
 class PathPreservingSOCKSConnection(
+    _HTTPVersionControlledRequestMixin,
     _PathPreservingRequestMixin,
     urllib3_socks.SOCKSConnection,
 ):
@@ -135,6 +228,7 @@ class PathPreservingSOCKSConnection(
 
 
 class PathPreservingSOCKSHTTPSConnection(
+    _HTTPVersionControlledRequestMixin,
     _PathPreservingRequestMixin,
     urllib3_socks.SOCKSHTTPSConnection,
 ):
@@ -547,8 +641,102 @@ class Requester(BaseRequester):
     def close(self) -> None:
         self.session.close()
 
+    def _request_http09(
+        self, path: str, proxy: str | None = None
+    ) -> HTTP09Response:
+        """Send a versionless HTTP/0.9 request over a raw socket.
+
+        HTTP/0.9 requests carry no headers: the request is a single line
+        ending in CRLF and the response is body-only until the server
+        closes the connection.
+        """
+        self.wait_for_rate_limit()
+
+        if proxy is not None:
+            raise RequestException("HTTP/0.9 does not support proxies")
+
+        request_path = self.request_path(path)
+        quoted_request_path = safequote(request_path)
+        url = self._url + quoted_request_path
+        target = _join_request_target(self._url, quoted_request_path)
+
+        parsed = urlparse(url)
+        if parsed.scheme != "http":
+            raise RequestException(
+                "--http-version 0.9 requires an http:// target URL"
+            )
+
+        host = parsed.hostname
+        port = parsed.port or 80
+        address = self._dns_resolver.resolve(host, port)
+
+        err_msg = None
+        for _ in range(options["max_retries"] + 1):
+            try:
+                start_time = time.perf_counter()
+                with socket.create_connection(
+                    (address, port), timeout=options["timeout"]
+                ) as sock:
+                    sock.sendall(f"GET {target}\r\n".encode("latin-1"))
+                    body = bytearray()
+                    while len(body) < MAX_RESPONSE_SIZE:
+                        try:
+                            chunk = sock.recv(ITER_CHUNK_SIZE)
+                        except socket.timeout:
+                            if body and _is_complete_http09_payload(
+                                bytes(body)
+                            ):
+                                break
+                            raise
+                        if not chunk:
+                            break
+                        body.extend(chunk)
+                        if _is_complete_http09_payload(bytes(body)):
+                            break
+
+                status, headers, response_body = _parse_http09_response(
+                    bytes(body)
+                )
+                response = HTTP09Response(
+                    url,
+                    status,
+                    headers,
+                    response_body,
+                    time.perf_counter() - start_time,
+                )
+
+                log_msg = (
+                    f'"{options["http_method"]} {url}" '
+                    f"{response.status} - {response.length}B"
+                )
+                if response.redirect:
+                    log_msg += f" - LOCATION: {response.redirect}"
+
+                logger.info(log_msg)
+
+                return response
+
+            except RequestException:
+                raise
+            except Exception as e:
+                logger.exception(e)
+
+                if isinstance(e, socket.gaierror):
+                    err_msg = "Couldn't resolve DNS"
+                elif isinstance(e, socket.timeout):
+                    err_msg = f"Request timeout: {url}"
+                elif isinstance(e, OSError):
+                    err_msg = f"Cannot connect to: {parsed.netloc}"
+                else:
+                    err_msg = f"There was a problem in the request to: {url}"
+
+        raise RequestException(err_msg)
+
     # :path: is expected not to start with "/"
-    def request(self, path: str, proxy: str | None = None) -> Response:
+    def request(self, path: str, proxy: str | None = None) -> BaseResponse:
+        if options.get("http_version") == "0.9":
+            return self._request_http09(path, proxy)
+
         self.wait_for_rate_limit()
 
         err_msg = None

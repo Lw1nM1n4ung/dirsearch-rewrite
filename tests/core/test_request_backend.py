@@ -11,6 +11,7 @@ def native_options(**overrides):
     values = {
         "async_mode": False,
         "http_method": "GET",
+        "http_version": "1.1",
         "data": None,
         "data_file": None,
         "proxies": [],
@@ -86,6 +87,23 @@ class TestRequestBackend(TestCase):
         self.assertEqual(
             get_native_request_backend_error(native_options(http_method="POST")),
             "--request-backend native currently supports GET requests only",
+        )
+
+    def test_native_rejects_non_http11_versions(self):
+        for version in ("0.9", "1.0"):
+            with self.subTest(version=version):
+                self.assertEqual(
+                    get_native_request_backend_error(
+                        native_options(http_version=version)
+                    ),
+                    "--request-backend native supports HTTP/1.1 only",
+                )
+
+    def test_native_accepts_http11(self):
+        self.assertIsNone(
+            get_native_request_backend_error(
+                native_options(http_version="1.1")
+            )
         )
 
     def test_native_accepts_http_proxies(self):

@@ -1,6 +1,8 @@
 # Changelog
 
 ## [Unreleased]
+- Added `--http-version` to control the HTTP protocol version (`0.9`, `1.0`, `1.1`); HTTP/0.9 uses a raw versionless socket exchange in the sync engine.
+
 - Added opt-in backup discovery for matched files.
 
 - Split CLI help into common (`-h` / `--help`) and complete (`-hh` / `--help-all`) views.

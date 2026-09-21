@@ -726,6 +726,11 @@ class Controller:
             )
             port = STANDARD_PORTS[scheme]
 
+        if options.get("http_version") == "0.9" and scheme != "http":
+            raise InvalidURLException(
+                "--http-version 0.9 requires an http:// target URL"
+            )
+
         if options["ip"]:
             self.requester.set_ip(parsed.hostname, port, options["ip"])
 

@@ -29,6 +29,7 @@ class TestCommandLineHelp(TestCase):
         self.assertNotIn("--wordlist-backend", output)
         self.assertNotIn("--match-header-regex", output)
         self.assertNotIn("--mysql-url", output)
+        self.assertNotIn("--http-version", output)
 
     def test_full_help_aliases_match(self):
         short_output = self._help_output("-hh")
@@ -39,6 +40,7 @@ class TestCommandLineHelp(TestCase):
         self.assertIn("--match-header-regex", short_output)
         self.assertIn("--mysql-url", short_output)
         self.assertIn("--find-backup", short_output)
+        self.assertIn("--http-version", short_output)
         self.assertIn(
             "Read request body from file without encoding or newline conversion",
             short_output.replace("\n                        ", " "),
@@ -71,6 +73,13 @@ class TestCommandLineHelp(TestCase):
         self.assertEqual(parsed.urls, ["https://example.com"])
         self.assertEqual(parsed.wordlists, "words.txt")
         self.assertEqual(parsed.thread_count, 20)
+
+    def test_http_version_flag_parses(self):
+        parsed = parse_arguments(
+            ["-u", "https://example.com", "--http-version", "0.9"]
+        )
+
+        self.assertEqual(parsed.http_version, "0.9")
 
     def test_help_alias_can_still_be_an_option_value(self):
         parsed = parse_arguments(["-H", "-hh"])

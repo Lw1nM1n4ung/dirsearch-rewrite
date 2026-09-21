@@ -186,6 +186,8 @@ Options:
                         HTTP method (default: GET)
     --request-backend=BACKEND
                         Request backend: python, native (default: python)
+    --http-version=VERSION
+                        HTTP protocol version (0.9, 1.0, 1.1) (default: 1.1)
     -d DATA, --data=DATA
                         HTTP request data
     --data-file=PATH    Read request body from file without encoding or newline

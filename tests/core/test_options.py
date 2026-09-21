@@ -49,6 +49,123 @@ class TestOptions(TestCase):
             output.getvalue(),
         )
 
+    def test_http_version_0_9_forces_sync_engine(self):
+        args = [
+            "dirsearch.py",
+            "--wordlist-status",
+            "-e",
+            "php",
+            "--http-version",
+            "0.9",
+        ]
+
+        with patch("sys.argv", args):
+            parsed = parse_options()
+
+        self.assertEqual(parsed["http_version"], "0.9")
+        self.assertFalse(parsed["async_mode"])
+
+    def test_http_version_0_9_with_async_is_rejected(self):
+        args = [
+            "dirsearch.py",
+            "--wordlist-status",
+            "-e",
+            "php",
+            "--http-version",
+            "0.9",
+            "--async",
+        ]
+        output = io.StringIO()
+
+        with (
+            patch("sys.argv", args),
+            redirect_stdout(output),
+            self.assertRaises(SystemExit) as ctx,
+        ):
+            parse_options()
+
+        self.assertEqual(ctx.exception.code, 1)
+        self.assertIn(
+            "--http-version 0.9 requires the sync engine",
+            output.getvalue(),
+        )
+
+    def test_invalid_http_version_is_rejected(self):
+        args = [
+            "dirsearch.py",
+            "--wordlist-status",
+            "-e",
+            "php",
+            "--http-version",
+            "2",
+        ]
+        output = io.StringIO()
+
+        with (
+            patch("sys.argv", args),
+            redirect_stdout(output),
+            self.assertRaises(SystemExit) as ctx,
+        ):
+            parse_options()
+
+        self.assertEqual(ctx.exception.code, 1)
+        self.assertIn(
+            "--http-version must be one of: 0.9, 1.0, 1.1",
+            output.getvalue(),
+        )
+
+    def test_http_version_0_9_rejects_proxies(self):
+        args = [
+            "dirsearch.py",
+            "--wordlist-status",
+            "-e",
+            "php",
+            "--http-version",
+            "0.9",
+            "--proxy",
+            "http://127.0.0.1:8080",
+        ]
+        output = io.StringIO()
+
+        with (
+            patch("sys.argv", args),
+            redirect_stdout(output),
+            self.assertRaises(SystemExit) as ctx,
+        ):
+            parse_options()
+
+        self.assertEqual(ctx.exception.code, 1)
+        self.assertIn(
+            "--http-version 0.9 does not support proxies",
+            output.getvalue(),
+        )
+
+    def test_http_version_0_9_rejects_non_get_methods(self):
+        args = [
+            "dirsearch.py",
+            "--wordlist-status",
+            "-e",
+            "php",
+            "--http-version",
+            "0.9",
+            "-m",
+            "HEAD",
+        ]
+        output = io.StringIO()
+
+        with (
+            patch("sys.argv", args),
+            redirect_stdout(output),
+            self.assertRaises(SystemExit) as ctx,
+        ):
+            parse_options()
+
+        self.assertEqual(ctx.exception.code, 1)
+        self.assertIn(
+            "--http-version 0.9 supports GET requests only",
+            output.getvalue(),
+        )
+
     def test_data_file_preserves_request_body_bytes(self):
         bodies = {
             "ascii": b"alpha=1&beta=2\r\nline=two\n",

@@ -36,6 +36,8 @@ def get_native_target_error(url: str) -> str | None:
 def get_native_request_backend_error(opt: Values) -> str | None:
     if opt.async_mode:
         return "--request-backend native cannot be combined with --async"
+    if getattr(opt, "http_version", "1.1") != "1.1":
+        return "--request-backend native supports HTTP/1.1 only"
     if opt.http_method and opt.http_method.upper() != "GET":
         return "--request-backend native currently supports GET requests only"
     if opt.data or opt.data_file:
